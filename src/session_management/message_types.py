@@ -387,8 +387,9 @@ class AgentInfo:
 @dataclass
 class ModelMessage:
     """模型消息"""
-    role: Literal["user", "assistant", "system"] = "user"
+    role: Literal["user", "assistant", "system", "tool"] = "user"
     content: Union[str, List[Dict[str, Any]]] = ""
+    tool_call_id: Optional[str] = None
 
 
 @dataclass

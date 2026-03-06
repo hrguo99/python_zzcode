@@ -135,6 +135,9 @@ class InterpreterSession:
                     converted_messages.append(Message.assistant(msg.content))
                 elif msg.role == "system":
                     converted_messages.append(Message.system(msg.content))
+                elif msg.role == "tool":
+                    # 将 tool 消息转换为 user 消息（包含工具结果）
+                    converted_messages.append(Message.user(f"Tool result: {msg.content}"))
 
             stream = self.interpreter._llm.stream(
                 messages=converted_messages,
@@ -145,13 +148,13 @@ class InterpreterSession:
             )
 
             # 收集本轮的工具结果和 finishReason
-            tool_results_text = []
+            tool_results = []  # 存储 (tool_call_id, tool_name, result)
             finish_reason = None
 
             # 转换并转发 StreamChunk
             async def convert_and_forward_stream():
                 """将 StreamChunk 转换为事件字典并转发"""
-                nonlocal finish_reason, tool_results_text
+                nonlocal finish_reason, tool_results
                 async for chunk in stream:
                     event = None
 
@@ -212,9 +215,9 @@ class InterpreterSession:
 
                                     result = await tool.execute(tool_input, tool_ctx)
 
-                                    # 收集工具结果
+                                    # 收集工具结果（tool_call_id, tool_name, result）
                                     tool_result_str = str(result.output) if hasattr(result, 'output') else str(result)
-                                    tool_results_text.append(f"Tool {tool_name}: {tool_result_str}")
+                                    tool_results.append((tool_call_id, tool_name, tool_result_str))
 
                                     # 发送 tool-result 事件
                                     yield {
@@ -264,9 +267,13 @@ class InterpreterSession:
 
             # 根据 finishReason 决定是否继续循环
             if finish_reason == "tool_calls":
-                # 添加工具结果到消息历史
-                if tool_results_text:
-                    messages.append(ModelMessage(role="assistant", content="\n".join(tool_results_text)))
+                # 为每个工具结果创建一个 tool 消息
+                for tool_call_id, tool_name, result in tool_results:
+                    messages.append(ModelMessage(
+                        role="tool",
+                        content=result,
+                        tool_call_id=tool_call_id
+                    ))
                 # 继续循环
                 continue
             elif finish_reason in ("stop", "length"):
