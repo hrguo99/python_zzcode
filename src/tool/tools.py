@@ -127,6 +127,10 @@ class BashTool(ToolDefinition):
             if error_output:
                 output = f"{output}\n{error_output}" if output else error_output
 
+            # If command succeeded with no output, provide clear success message
+            if process.returncode == 0 and not output.strip():
+                output = f"Command executed successfully (exit code 0)"
+
             # Truncate if too long
             truncated = False
             if len(output) > self.MAX_OUTPUT_LENGTH:

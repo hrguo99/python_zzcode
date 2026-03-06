@@ -111,9 +111,12 @@ class BuiltinAgents:
 
                 "Tool Usage Guidelines:\n"
                 "- Use Read to examine file contents when you need context\n"
-                "- Use Write to create or completely replace files\n"
-                "- Use Bash to execute commands and run tests\n"
-                "- Use Glob to find files by pattern matching\n"
+                "- Use Write to create new files or completely replace file contents\n"
+                "- Use Edit to modify existing files by replacing specific text\n"
+                "- Use Bash for: running commands, executing scripts, file operations (delete/move/copy), running tests\n"
+                "  * IMPORTANT: Use 'rm' command in Bash to delete files, NOT Write or Edit tools\n"
+                "  * Example: To delete test.md, use Bash with command 'rm test.md'\n"
+                "- Use Glob to find files by pattern matching (e.g., '*.py', 'src/**/*.ts')\n"
                 "- Use Grep to search code with regex patterns\n\n"
 
                 "Best Practices:\n"

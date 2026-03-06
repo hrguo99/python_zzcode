@@ -269,12 +269,16 @@ class InterpreterSession:
             if finish_reason == "tool_calls":
                 # 为每个工具结果创建一个 tool 消息，包含工具名称
                 for tool_call_id, tool_name, result in tool_results:
-                    messages.append(ModelMessage(
+                    tool_msg = ModelMessage(
                         role="tool",
                         content=f"[Tool: {tool_name}]\n{result}",
                         tool_call_id=tool_call_id
-                    ))
+                    )
+                    messages.append(tool_msg)
+                    # 调试：打印工具结果
+                    logger.debug(f"Added tool result: tool={tool_name}, result={result[:100]}...")
                 # 继续循环
+                logger.debug(f"Continuing loop, iteration={iteration}, finish_reason={finish_reason}")
                 continue
             elif finish_reason in ("stop", "length"):
                 # 退出循环
