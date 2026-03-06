@@ -95,6 +95,16 @@ from .session_compaction import (
     prune_session,
 )
 
+from .session_storage import SessionStorage
+from .session_manager import SessionManager, SessionInfo
+from .session_events import (
+    EventBus,
+    SessionEvent,
+    SessionEventType,
+    get_event_bus,
+)
+from .message_filter import filter_compacted, filter_compacted_stream
+
 __all__ = [
     # 消息类型
     "Message",
@@ -171,4 +181,17 @@ __all__ = [
     "ModelLimits",
     "check_overflow",
     "prune_session",
+    # 会话存储
+    "SessionStorage",
+    # 会话管理
+    "SessionManager",
+    "SessionInfo",
+    # 事件系统
+    "EventBus",
+    "SessionEvent",
+    "SessionEventType",
+    "get_event_bus",
+    # 消息过滤
+    "filter_compacted",
+    "filter_compacted_stream",
 ]

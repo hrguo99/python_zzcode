@@ -18,6 +18,7 @@ from interpreter import InterpreterConfig
 from orchestrator import Orchestrator
 from agent import AgentConfig
 from tool import ReadTool, WriteTool, BashTool, GlobTool, GrepTool
+from session_management import SessionStorage, SessionManager
 
 
 async def main():
@@ -40,6 +41,12 @@ async def main():
     agent_config = AgentConfig(
         default_agent="build",
     )
+
+    # 初始化会话管理
+    db_path = str(Path.cwd() / ".opencode" / "sessions.db")
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    storage = SessionStorage(db_path)
+    session_manager = SessionManager(storage, "opencode-python", "1.0.0")
 
     # 2. 创建 Orchestrator（已优化：权限缓存 + 工具工厂）
     print("✅ 创建 Orchestrator（支持渐进式工具披露 + 性能优化）...")
@@ -70,8 +77,12 @@ async def main():
         print("-" * 60)
         print()
 
-        # 简单的交互循环
-        session_id = "user_001"
+        # 创建会话
+        session = session_manager.create(
+            directory=str(Path.cwd()),
+            title="Interactive Session"
+        )
+        print(f"📝 会话ID: {session.id}\n")
 
         while True:
             try:
@@ -93,7 +104,7 @@ async def main():
                 event_count = {}  # 调试：统计事件类型
                 async for event in orch.process(
                     user_input=user_input,
-                    session_id=session_id,
+                    session_id=session.id,
                 ):
                     event_type = event.get("type")
                     event_count[event_type] = event_count.get(event_type, 0) + 1

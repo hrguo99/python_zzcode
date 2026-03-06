@@ -19,6 +19,7 @@ from .message_types import (
     UserMessage,
     AssistantMessage,
     ToolStatus,
+    ToolStateCompleted,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class SessionCompaction:
         model_limit: 'ModelLimits',
         config: Optional[CompactionConfig] = None,
         max_output_tokens: int = 8192,
+        storage: Optional['SessionStorage'] = None,
     ):
         """
         初始化会话压缩器
@@ -92,10 +94,12 @@ class SessionCompaction:
             model_limit: 模型限制
             config: 压缩配置
             max_output_tokens: 最大输出token数
+            storage: 会话存储（用于持久化）
         """
         self.model_limit = model_limit
         self.config = config or CompactionConfig()
         self.max_output_tokens = max_output_tokens
+        self.storage = storage
 
     async def is_overflow(
         self,
@@ -103,7 +107,7 @@ class SessionCompaction:
         model: ModelInfo,
     ) -> bool:
         """
-        检查token使用是否溢出
+        检查token使用是否溢出（对齐OpenCode逻辑）
 
         Args:
             tokens: Token使用统计
@@ -119,14 +123,16 @@ class SessionCompaction:
         if context == 0:
             return False
 
-        # 计算总token使用
+        # 计算总token使用（包含缓存）
         count = (
             tokens.total or
             tokens.input + tokens.output + tokens.cache_read + tokens.cache_write
         )
 
-        # 计算可用token
-        reserved = self.config.reserved
+        # 计算保留缓冲区（默认20,000或最大输出token）
+        reserved = min(self.config.reserved, self.max_output_tokens)
+
+        # 计算可用上下文
         if self.model_limit.max_input:
             usable = self.model_limit.max_input - reserved
         else:
@@ -136,10 +142,14 @@ class SessionCompaction:
 
     async def prune(self, session_id: str) -> None:
         """
-        修剪旧的工具调用输出
+        修剪旧的工具调用输出（对齐OpenCode策略）
 
-        从后向前遍历消息，直到找到40000 token的工具调用，
-        然后清除更早的工具调用输出。
+        策略：
+        - 保护最近2轮对话
+        - 保护特定工具（如skill）
+        - 累计超过40K tokens的工具输出
+        - 最少剪枝20K tokens才执行
+        - 遇到已压缩消息停止
 
         Args:
             session_id: 会话ID
@@ -149,9 +159,16 @@ class SessionCompaction:
 
         logger.info("Pruning session", extra={"session_id": session_id})
 
-        # 获取消息（需要从数据库或存储中获取）
-        # 这里是简化版本，实际实现需要从session存储中获取
-        messages: List[MessageWithParts] = []  # TODO: 从存储获取
+        if not self.storage:
+            logger.warning("No storage configured, skipping prune")
+            return
+
+        # 从存储获取消息
+        messages_data = self.storage.get_messages(session_id)
+        messages: List[MessageWithParts] = []
+        for msg in messages_data:
+            parts = self.storage.get_parts(msg.id)
+            messages.append(MessageWithParts(info=msg, parts=parts))
 
         total = 0
         pruned = 0
@@ -161,46 +178,60 @@ class SessionCompaction:
         # 从后向前遍历
         for msg_index in range(len(messages) - 1, -1, -1):
             msg = messages[msg_index]
+
+            # 统计用户轮次
             if msg.info.role == "user":
                 turns += 1
+
+            # 保护最近2轮对话
             if turns < 2:
                 continue
 
-            # 如果遇到摘要消息，停止
-            if isinstance(msg.info, AssistantMessage) and msg.info.summary:
+            # 遇到摘要消息停止（已压缩点）
+            if isinstance(msg.info, AssistantMessage) and getattr(msg.info, 'summary', False):
                 break
 
-            # 遍历部分
+            # 遍历部分（从后向前）
             for part_index in range(len(msg.parts) - 1, -1, -1):
                 part = msg.parts[part_index]
-                if isinstance(part, ToolPart):
-                    if part.state.status == ToolStatus.COMPLETED:
-                        # 跳过被保护的工具
-                        if part.tool in self.PRUNE_PROTECTED_TOOLS:
-                            continue
 
-                        # 如果已经压缩过，停止
-                        if isinstance(part.state, ToolStateCompleted) and part.state.time_compacted:
-                            break
+                if isinstance(part, ToolPart) and part.state.status == ToolStatus.COMPLETED:
+                    # 保护特定工具
+                    if part.tool in self.PRUNE_PROTECTED_TOOLS:
+                        continue
 
-                        # 估算token数
-                        estimate = self._estimate_tokens(part.state.output)
-                        total += estimate
+                    # 遇到已剪枝的输出停止
+                    if isinstance(part.state, ToolStateCompleted) and part.state.time_compacted:
+                        break
 
-                        if total > self.PRUNE_PROTECT:
-                            pruned += estimate
-                            to_prune.append(part)
+                    # 估算token数
+                    estimate = self._estimate_tokens(part.state.output)
+                    total += estimate
 
-        logger.info("Found parts to prune", extra={"pruned": pruned, "total": total})
+                    # 累计超过PRUNE_PROTECT的输出
+                    if total > self.PRUNE_PROTECT:
+                        pruned += estimate
+                        to_prune.append(part)
 
+        logger.info("Prune analysis", extra={
+            "total_tokens": total,
+            "pruned_tokens": pruned,
+            "parts_to_prune": len(to_prune)
+        })
+
+        # 只有剪枝量超过PRUNE_MINIMUM才执行
         if pruned > self.PRUNE_MINIMUM:
             for part in to_prune:
                 if isinstance(part.state, ToolStateCompleted):
                     # 标记为已压缩
                     part.state.time_compacted = int(time.time() * 1000)
-                    # TODO: 更新到存储
+                    # 清空输出内容（可选）
+                    # part.state.output = "[Old tool result content cleared]"
+                    # 更新到存储
+                    if self.storage:
+                        self.storage.save_part(part)
 
-            logger.info("Pruned parts", extra={"count": len(to_prune)})
+            logger.info("Pruning completed", extra={"count": len(to_prune)})
 
     async def process(
         self,
@@ -211,9 +242,13 @@ class SessionCompaction:
         auto: bool = True,
     ) -> CompactionResult:
         """
-        执行会话压缩
+        执行会话压缩（对齐OpenCode流程）
 
-        生成会话摘要以减少上下文大小。
+        流程：
+        1. 找到用户消息
+        2. 生成压缩摘要
+        3. 创建标记为summary的助手消息
+        4. 可选：自动继续对话
 
         Args:
             parent_id: 父消息ID
@@ -233,13 +268,13 @@ class SessionCompaction:
                 break
 
         if not user_message:
-            logger.error("User message not found for compaction")
+            logger.error("User message not found for compaction", extra={"parent_id": parent_id})
             return CompactionResult.STOP
 
-        # 生成摘要提示
+        # 生成压缩提示
         prompt_text = self._get_compaction_prompt()
 
-        # 构建消息历史
+        # 构建模型消息
         model_messages = self._to_model_messages(messages, model=user_message.model)
 
         # 添加压缩提示
@@ -248,15 +283,21 @@ class SessionCompaction:
             "content": prompt_text,
         })
 
+        logger.info("Compaction process started", extra={
+            "session_id": session_id,
+            "parent_id": parent_id,
+            "message_count": len(model_messages)
+        })
+
         # TODO: 调用LLM生成摘要
-        # 这里需要集成LLM接口
+        # 这里需要集成LLM接口来生成压缩摘要
+        # summary_response = await llm.generate(model_messages)
 
-        # 如果自动继续，添加继续消息
+        # 如果自动继续，返回CONTINUE
         if auto:
-            # TODO: 创建继续消息
-            pass
+            return CompactionResult.CONTINUE
 
-        return CompactionResult.CONTINUE
+        return CompactionResult.STOP
 
     def _get_compaction_prompt(self) -> str:
         """获取压缩提示"""
