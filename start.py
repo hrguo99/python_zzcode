@@ -76,7 +76,7 @@ async def main():
         while True:
             try:
                 # 获取用户输入
-                user_input = input("\n💬 你: ").strip()
+                user_input = input("\n用户: ").strip()
 
                 if not user_input:
                     continue
@@ -86,15 +86,17 @@ async def main():
                     break
 
                 # 处理输入
-                print("\n🤖 AI: ", end="", flush=True)
+                print("\nzz_code: ", end="", flush=True)
 
                 response_parts = []
                 tool_used = None
+                event_count = {}  # 调试：统计事件类型
                 async for event in orch.process(
                     user_input=user_input,
                     session_id=session_id,
                 ):
                     event_type = event.get("type")
+                    event_count[event_type] = event_count.get(event_type, 0) + 1
 
                     # 只显示文本内容给用户
                     if event_type == "content":
@@ -105,6 +107,9 @@ async def main():
                         text = event.get("text", "")
                         print(text, end="", flush=True)
                         response_parts.append(text)
+                    elif event_type == "result":
+                        # 调试：查看 result 事件内容
+                        print(f"\n[DEBUG] result 事件: {event}", flush=True)
                     # 记录工具调用
                     elif event_type == "tool-call":
                         tool_used = event.get("tool_name")
@@ -117,8 +122,14 @@ async def main():
                         error_msg = event.get("error", "")
                         print(f"\n\n⚠️  工具执行失败: {error_msg}")
 
+                # 调试信息
+                print(f"\n[DEBUG] 事件统计: {event_count}", flush=True)
+                print(f"[DEBUG] response_parts 长度: {len(response_parts)}", flush=True)
+                print(f"[DEBUG] tool_used: {tool_used}", flush=True)
+
                 # 如果AI没有生成文本但使用了工具，显示友好的确认消息
                 if not response_parts and tool_used:
+                    print("\n[DEBUG] 触发备用消息逻辑", flush=True)
                     tool_messages = {
                         "write": "好的，文件已创建完成。",
                         "read": "好的，文件内容已读取。",

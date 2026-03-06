@@ -116,131 +116,168 @@ class InterpreterSession:
             on_parts_get=self._on_parts_get,
         )
 
-        # 执行 LLM 调用
-        # 转换 ModelMessage 到 ai_sdk.Message 格式
+        # 执行 LLM 调用循环
         from ai_sdk.message import Message
-        converted_messages = []
-        for msg in messages:
-            if msg.role == "user":
-                converted_messages.append(Message.user(msg.content))
-            elif msg.role == "assistant":
-                converted_messages.append(Message.assistant(msg.content))
-            elif msg.role == "system":
-                converted_messages.append(Message.system(msg.content))
 
-        stream = self.interpreter._llm.stream(
-            messages=converted_messages,
-            tools=tools,
-            system=system,
-            temperature=self.agent.temperature or self.interpreter.config.temperature,
-            tool_choice=self.interpreter.config.tool_choice,
-        )
+        max_iterations = 10
+        iteration = 0
+        all_collected_text = []
 
-        # 转换并转发 StreamChunk
-        async def convert_and_forward_stream():
-            """将 StreamChunk 转换为事件字典并转发"""
-            async for chunk in stream:
-                event = None
+        while iteration < max_iterations:
+            iteration += 1
 
-                # 文本增量
-                if chunk.delta:
-                    event = {"type": "text-delta", "delta": chunk.delta}
-                    yield event
+            # 转换 ModelMessage 到 ai_sdk.Message 格式
+            converted_messages = []
+            for msg in messages:
+                if msg.role == "user":
+                    converted_messages.append(Message.user(msg.content))
+                elif msg.role == "assistant":
+                    converted_messages.append(Message.assistant(msg.content))
+                elif msg.role == "system":
+                    converted_messages.append(Message.system(msg.content))
 
-                # 工具调用
-                if chunk.tool_calls:
-                    import json
-                    for tool_call in chunk.tool_calls:
-                        # 解析工具调用格式
-                        func_data = tool_call.get("function", {})
-                        tool_name = func_data.get("name", "")
-                        arguments_str = func_data.get("arguments", "{}")
+            stream = self.interpreter._llm.stream(
+                messages=converted_messages,
+                tools=tools,
+                system=system,
+                temperature=self.agent.temperature or self.interpreter.config.temperature,
+                tool_choice=self.interpreter.config.tool_choice,
+            )
 
-                        # 解析参数
-                        tool_input = {}
-                        if arguments_str:
-                            try:
-                                tool_input = json.loads(arguments_str)
-                            except json.JSONDecodeError:
-                                tool_input = {"arguments": arguments_str}
+            # 收集本轮的工具结果和 finishReason
+            tool_results_text = []
+            finish_reason = None
 
-                        # 生成工具调用 ID
-                        tool_call_id = tool_call.get("id", f"call_{int(time.time() * 1000)}")
+            # 转换并转发 StreamChunk
+            async def convert_and_forward_stream():
+                """将 StreamChunk 转换为事件字典并转发"""
+                nonlocal finish_reason, tool_results_text
+                async for chunk in stream:
+                    event = None
 
-                        # 发送 tool-input-start 事件（创建 tool part）
-                        yield {
-                            "type": "tool-input-start",
-                            "id": tool_call_id,
-                            "tool_name": tool_name,
-                        }
+                    # 文本增量
+                    if chunk.delta:
+                        event = {"type": "text-delta", "delta": chunk.delta}
+                        yield event
 
-                        # 发送 tool-call 事件（更新为 running 状态）
+                    # 工具调用
+                    if chunk.tool_calls:
+                        import json
+                        for tool_call in chunk.tool_calls:
+                            # 解析工具调用格式
+                            func_data = tool_call.get("function", {})
+                            tool_name = func_data.get("name", "")
+                            arguments_str = func_data.get("arguments", "{}")
+
+                            # 解析参数
+                            tool_input = {}
+                            if arguments_str:
+                                try:
+                                    tool_input = json.loads(arguments_str)
+                                except json.JSONDecodeError:
+                                    tool_input = {"arguments": arguments_str}
+
+                            # 生成工具调用 ID
+                            tool_call_id = tool_call.get("id", f"call_{int(time.time() * 1000)}")
+
+                            # 发送 tool-input-start 事件（创建 tool part）
+                            yield {
+                                "type": "tool-input-start",
+                                "id": tool_call_id,
+                                "tool_name": tool_name,
+                            }
+
+                            # 发送 tool-call 事件（更新为 running 状态）
+                            event = {
+                                "type": "tool-call",
+                                "tool_call_id": tool_call_id,
+                                "tool_name": tool_name,
+                                "input": tool_input,
+                                "provider_metadata": tool_call,
+                            }
+                            yield event
+
+                            # 执行工具
+                            tool = self.tools.get(tool_name)
+                            if tool and hasattr(tool, 'execute'):
+                                try:
+                                    # Create ToolContext for ToolDefinition tools
+                                    from tool.base import ToolContext
+                                    tool_ctx = ToolContext(
+                                        session_id=self.session_id,
+                                        message_id=self._current_message.id,
+                                        agent=self.agent.name,
+                                        abort_signal=self.abort_signal,
+                                    )
+
+                                    result = await tool.execute(tool_input, tool_ctx)
+
+                                    # 收集工具结果
+                                    tool_result_str = str(result.output) if hasattr(result, 'output') else str(result)
+                                    tool_results_text.append(f"Tool {tool_name}: {tool_result_str}")
+
+                                    # 发送 tool-result 事件
+                                    yield {
+                                        "type": "tool-result",
+                                        "tool_call_id": tool_call_id,
+                                        "output": tool_result_str,
+                                        "metadata": {"title": f"Tool {tool_name} executed"},
+                                    }
+                                except Exception as e:
+                                    # 发送 tool-error 事件
+                                    yield {
+                                        "type": "tool-error",
+                                        "tool_call_id": tool_call_id,
+                                        "error": str(e),
+                                    }
+
+                    # 完成
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
                         event = {
-                            "type": "tool-call",
-                            "tool_call_id": tool_call_id,
-                            "tool_name": tool_name,
-                            "input": tool_input,
-                            "provider_metadata": tool_call,
+                            "type": "finish",
+                            "finish_reason": chunk.finish_reason,
+                            "usage": chunk.usage or {},
                         }
                         yield event
 
-                        # 执行工具
-                        tool = self.tools.get(tool_name)
-                        if tool and hasattr(tool, 'execute'):
-                            try:
-                                # Create ToolContext for ToolDefinition tools
-                                from tool.base import ToolContext
-                                tool_ctx = ToolContext(
-                                    session_id=self.session_id,
-                                    message_id=self._current_message.id,
-                                    agent=self.agent.name,
-                                    abort_signal=self.abort_signal,
-                                )
 
-                                result = await tool.execute(tool_input, tool_ctx)
+            # 收集事件和文本
+            events = []
+            collected_text = []
+            async for event in convert_and_forward_stream():
+                events.append(event)
 
-                                # 发送 tool-result 事件
-                                yield {
-                                    "type": "tool-result",
-                                    "tool_call_id": tool_call_id,
-                                    "output": str(result.output) if hasattr(result, 'output') else str(result),
-                                    "metadata": {"title": f"Tool {tool_name} executed"},
-                                }
-                            except Exception as e:
-                                # 发送 tool-error 事件
-                                yield {
-                                    "type": "tool-error",
-                                    "tool_call_id": tool_call_id,
-                                    "error": str(e),
-                                }
-
-                # 完成
-                if chunk.finish_reason:
-                    event = {
-                        "type": "finish",
-                        "finish_reason": chunk.finish_reason,
-                        "usage": chunk.usage or {},
-                    }
+                # Forward all events to the user, not just text-delta
+                event_type = event.get("type")
+                if event_type == "text-delta":
+                    delta = event.get("delta")
+                    collected_text.append(delta)
+                    all_collected_text.append(delta)
+                    yield {"type": "text", "text": delta}
+                elif event_type in ("tool-input-start", "tool-call", "tool-result", "tool-error", "error", "finish"):
+                    # Forward tool-related and error events
+                    yield event
+                elif event_type == "processing":
+                    # Forward processing events
                     yield event
 
-        # 收集事件和文本
-        events = []
-        collected_text = []
-        async for event in convert_and_forward_stream():
-            events.append(event)
-
-            # Forward all events to the user, not just text-delta
-            event_type = event.get("type")
-            if event_type == "text-delta":
-                delta = event.get("delta")
-                collected_text.append(delta)
-                yield {"type": "text", "text": delta}
-            elif event_type in ("tool-input-start", "tool-call", "tool-result", "tool-error", "error", "finish"):
-                # Forward tool-related and error events
-                yield event
-            elif event_type == "processing":
-                # Forward processing events
-                yield event
+            # 根据 finishReason 决定是否继续循环
+            if finish_reason == "tool_calls":
+                # 添加工具结果到消息历史
+                if tool_results_text:
+                    messages.append(ModelMessage(role="assistant", content="\n".join(tool_results_text)))
+                # 继续循环
+                continue
+            elif finish_reason in ("stop", "length"):
+                # 退出循环
+                break
+            elif finish_reason == "unknown":
+                # 重试：继续循环
+                continue
+            else:
+                # 未知情况，退出循环
+                break
 
         # 处理收集的事件
         async def replay_events():
@@ -252,7 +289,7 @@ class InterpreterSession:
         # 创建助手消息用于历史记录
         assistant_model_message = ModelMessage(
             role="assistant",
-            content="".join(collected_text),
+            content="".join(all_collected_text),
         )
 
         # 返回最终结果
