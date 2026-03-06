@@ -267,11 +267,11 @@ class InterpreterSession:
 
             # 根据 finishReason 决定是否继续循环
             if finish_reason == "tool_calls":
-                # 为每个工具结果创建一个 tool 消息
+                # 为每个工具结果创建一个 tool 消息，包含工具名称
                 for tool_call_id, tool_name, result in tool_results:
                     messages.append(ModelMessage(
                         role="tool",
-                        content=result,
+                        content=f"[Tool: {tool_name}]\n{result}",
                         tool_call_id=tool_call_id
                     ))
                 # 继续循环
