@@ -109,6 +109,13 @@ class BuiltinAgents:
                 "- Validate assumptions before proceeding with complex operations\n"
                 "- Handle errors gracefully and provide helpful error messages\n\n"
 
+                "CRITICAL: Tool Usage Requirements:\n"
+                "- When a user asks you to PERFORM AN ACTION (read a file, write code, delete files, execute commands),\n"
+                "  you MUST use the appropriate tool - never just describe what you would do\n"
+                "- For informational questions, explanations, or discussions, you do NOT need to use tools\n"
+                "- Do NOT generate text that looks like tool output - always call the actual tool when performing actions\n"
+                "- Do NOT claim you have performed an action unless you actually called the tool and received a result\n\n"
+
                 "Tool Usage Guidelines:\n"
                 "- Use Read to examine file contents when you need context\n"
                 "- Use Write to create new files or completely replace file contents\n"
