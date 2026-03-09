@@ -139,6 +139,13 @@ class InterpreterSession:
                     # 将 tool 消息转换为 user 消息（包含工具结果）
                     converted_messages.append(Message.user(f"Tool result: {msg.content}"))
 
+            # 调试：打印工具信息
+            print(f"\n[工具调试] 传递给 LLM 的工具数量: {len(tools) if tools else 0}")
+            if tools:
+                print(f"[工具调试] 工具列表: {list(tools.keys())}")
+            else:
+                print(f"[工具调试] 警告：没有工具被传递给 LLM！")
+
             stream = self.interpreter._llm.stream(
                 messages=converted_messages,
                 tools=tools,
