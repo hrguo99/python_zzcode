@@ -38,7 +38,7 @@ class InteractionInput:
     agent: InteractionAgent
     system: List[str]
     messages: List[Dict[str, Any]]
-    tools: List[str]
+    tools: List[Dict[str, Any]]  # 完整工具信息：name, description, inputSchema
     tool_choice: Optional[str] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
@@ -51,6 +51,9 @@ class ToolCallRecord:
     id: str
     tool_name: str
     input: Dict[str, Any]
+    output: Optional[Any] = None
+    error: Optional[str] = None
+    duration: Optional[int] = None
 
 
 @dataclass
@@ -62,6 +65,14 @@ class TokenUsageRecord:
 
 
 @dataclass
+class EventRecord:
+    """事件记录"""
+    type: str
+    timestamp: int
+    data: Optional[Dict[str, Any]] = None
+
+
+@dataclass
 class InteractionOutput:
     """交互输出"""
     timestamp: int
@@ -70,6 +81,7 @@ class InteractionOutput:
     tool_calls: List[ToolCallRecord]
     finish_reason: str
     usage: Optional[TokenUsageRecord] = None
+    events: Optional[List[EventRecord]] = None
 
 
 @dataclass
@@ -90,6 +102,7 @@ class InteractionTracker:
     - 输出结果（文本、工具调用、Token使用）
     - 错误信息
     - 时间统计
+    - 事件流
 
     示例：
         ```python
@@ -102,8 +115,22 @@ class InteractionTracker:
             agent=InteractionAgent(name="planner", mode="plan"),
             system=["You are a helpful assistant"],
             messages=[{"role": "user", "content": "Hello"}],
-            tools=["read", "write"],
+            tools=[
+                {
+                    "name": "Read",
+                    "description": "Reads a file from the local filesystem",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"file_path": {"type": "string"}},
+                        "required": ["file_path"]
+                    }
+                }
+            ],
         )
+
+        # 记录事件
+        tracker.add_event("text-start")
+        tracker.add_event("text-delta", {"text": "Hello"})
 
         # 记录输出
         tracker.record_output(
@@ -208,6 +235,7 @@ class InteractionTracker:
         tool_calls: List[ToolCallRecord],
         finish_reason: str,
         usage: Optional[TokenUsageRecord] = None,
+        events: Optional[List[EventRecord]] = None,
     ) -> None:
         """
         记录交互输出
@@ -217,6 +245,7 @@ class InteractionTracker:
             tool_calls: 工具调用列表
             finish_reason: 完成原因
             usage: Token使用统计
+            events: 事件流记录
         """
         if self._current_interaction is None:
             logger.warning("No active interaction to record output")
@@ -232,6 +261,7 @@ class InteractionTracker:
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
+            events=events,
         )
 
         logger.debug(
@@ -263,6 +293,41 @@ class InteractionTracker:
                 "error": error,
             }
         )
+
+    def add_event(self, event_type: str, data: Optional[Dict[str, Any]] = None) -> None:
+        """
+        添加事件记录
+
+        Args:
+            event_type: 事件类型（如 "text-delta", "tool-call", "tool-result"）
+            data: 事件数据
+        """
+        if self._current_interaction is None:
+            logger.warning("No active interaction to add event")
+            return
+
+        import time
+        event = EventRecord(
+            type=event_type,
+            timestamp=int(time.time() * 1000),
+            data=data,
+        )
+
+        # 初始化 output 和 events 列表（如果需要）
+        if self._current_interaction.output is None:
+            self._current_interaction.output = InteractionOutput(
+                timestamp=0,
+                duration=0,
+                text="",
+                tool_calls=[],
+                finish_reason="",
+                events=[],
+            )
+
+        if self._current_interaction.output.events is None:
+            self._current_interaction.output.events = []
+
+        self._current_interaction.output.events.append(event)
 
     async def save(self) -> None:
         """
@@ -306,15 +371,15 @@ class InteractionTracker:
             self._current_interaction = None
 
     def _serialize_interaction(self, interaction: Interaction) -> Dict[str, Any]:
-        """序列化交互对象为字典"""
+        """序列化交互对象为字典（使用camelCase）"""
         return {
             "id": interaction.id,
             "input": {
-                "session_id": interaction.input.session_id,
+                "sessionID": interaction.input.session_id,
                 "timestamp": interaction.input.timestamp,
                 "model": {
-                    "provider_id": interaction.input.model.provider_id,
-                    "model_id": interaction.input.model.model_id,
+                    "providerID": interaction.input.model.provider_id,
+                    "modelID": interaction.input.model.model_id,
                 },
                 "agent": {
                     "name": interaction.input.agent.name,
@@ -323,29 +388,40 @@ class InteractionTracker:
                 "system": interaction.input.system,
                 "messages": interaction.input.messages,
                 "tools": interaction.input.tools,
-                "tool_choice": interaction.input.tool_choice,
+                "toolChoice": interaction.input.tool_choice,
                 "temperature": interaction.input.temperature,
-                "top_p": interaction.input.top_p,
-                "top_k": interaction.input.top_k,
+                "topP": interaction.input.top_p,
+                "topK": interaction.input.top_k,
             },
             "output": {
                 "timestamp": interaction.output.timestamp,
                 "duration": interaction.output.duration,
                 "text": interaction.output.text,
-                "tool_calls": [
+                "toolCalls": [
                     {
                         "id": tc.id,
-                        "tool_name": tc.tool_name,
+                        "toolName": tc.tool_name,
                         "input": tc.input,
+                        "output": tc.output,
+                        "error": tc.error,
+                        "duration": tc.duration,
                     }
                     for tc in interaction.output.tool_calls
                 ],
-                "finish_reason": interaction.output.finish_reason,
+                "finishReason": interaction.output.finish_reason,
                 "usage": {
-                    "prompt_tokens": interaction.output.usage.prompt_tokens,
-                    "completion_tokens": interaction.output.usage.completion_tokens,
-                    "total_tokens": interaction.output.usage.total_tokens,
+                    "promptTokens": interaction.output.usage.prompt_tokens,
+                    "completionTokens": interaction.output.usage.completion_tokens,
+                    "totalTokens": interaction.output.usage.total_tokens,
                 } if interaction.output.usage else None,
+                "events": [
+                    {
+                        "type": e.type,
+                        "timestamp": e.timestamp,
+                        "data": e.data,
+                    }
+                    for e in interaction.output.events
+                ] if interaction.output.events else None,
             } if interaction.output else None,
             "error": interaction.error,
         }
@@ -381,18 +457,22 @@ class InteractionTracker:
             return []
 
     def _deserialize_interaction(self, data: Dict[str, Any]) -> Interaction:
-        """从字典反序列化交互对象"""
+        """从字典反序列化交互对象（支持camelCase和snake_case）"""
         input_data = data["input"]
         output_data = data.get("output")
+
+        # 支持两种命名格式
+        def get_field(obj: Dict, camel: str, snake: str):
+            return obj.get(camel) or obj.get(snake)
 
         return Interaction(
             id=data["id"],
             input=InteractionInput(
-                session_id=input_data["session_id"],
+                session_id=get_field(input_data, "sessionID", "session_id"),
                 timestamp=input_data["timestamp"],
                 model=InteractionModel(
-                    provider_id=input_data["model"]["provider_id"],
-                    model_id=input_data["model"]["model_id"],
+                    provider_id=get_field(input_data["model"], "providerID", "provider_id"),
+                    model_id=get_field(input_data["model"], "modelID", "model_id"),
                 ),
                 agent=InteractionAgent(
                     name=input_data["agent"]["name"],
@@ -401,10 +481,10 @@ class InteractionTracker:
                 system=input_data["system"],
                 messages=input_data["messages"],
                 tools=input_data["tools"],
-                tool_choice=input_data.get("tool_choice"),
+                tool_choice=get_field(input_data, "toolChoice", "tool_choice"),
                 temperature=input_data.get("temperature"),
-                top_p=input_data.get("top_p"),
-                top_k=input_data.get("top_k"),
+                top_p=get_field(input_data, "topP", "top_p"),
+                top_k=get_field(input_data, "topK", "top_k"),
             ),
             output=InteractionOutput(
                 timestamp=output_data["timestamp"],
@@ -413,17 +493,28 @@ class InteractionTracker:
                 tool_calls=[
                     ToolCallRecord(
                         id=tc["id"],
-                        tool_name=tc["tool_name"],
+                        tool_name=get_field(tc, "toolName", "tool_name"),
                         input=tc["input"],
+                        output=tc.get("output"),
+                        error=tc.get("error"),
+                        duration=tc.get("duration"),
                     )
-                    for tc in output_data["tool_calls"]
+                    for tc in get_field(output_data, "toolCalls", "tool_calls") or []
                 ],
-                finish_reason=output_data["finish_reason"],
+                finish_reason=get_field(output_data, "finishReason", "finish_reason"),
                 usage=TokenUsageRecord(
-                    prompt_tokens=output_data["usage"]["prompt_tokens"],
-                    completion_tokens=output_data["usage"]["completion_tokens"],
-                    total_tokens=output_data["usage"]["total_tokens"],
+                    prompt_tokens=get_field(output_data["usage"], "promptTokens", "prompt_tokens"),
+                    completion_tokens=get_field(output_data["usage"], "completionTokens", "completion_tokens"),
+                    total_tokens=get_field(output_data["usage"], "totalTokens", "total_tokens"),
                 ) if output_data.get("usage") else None,
+                events=[
+                    EventRecord(
+                        type=e["type"],
+                        timestamp=e["timestamp"],
+                        data=e.get("data"),
+                    )
+                    for e in output_data.get("events") or []
+                ] if output_data.get("events") else None,
             ) if output_data else None,
             error=data.get("error"),
         )
@@ -566,10 +657,11 @@ def record_output(
     tool_calls: List[ToolCallRecord],
     finish_reason: str,
     usage: Optional[TokenUsageRecord] = None,
+    events: Optional[List[EventRecord]] = None,
 ) -> None:
     """记录交互输出（使用全局追踪器）"""
     tracker = get_tracker()
-    tracker.record_output(text, tool_calls, finish_reason, usage)
+    tracker.record_output(text, tool_calls, finish_reason, usage, events)
 
 
 def record_error(error: str) -> None:

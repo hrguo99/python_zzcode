@@ -26,6 +26,7 @@ from session_management import (
     ToolStatus,
     InteractionTracker,
 )
+from session_management.interaction_tracker import ToolCallRecord, TokenUsageRecord
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ class EventHandler:
 
         # 交互追踪状态
         self.interaction_output_text = ""
-        self.interaction_tool_calls: List[Dict[str, Any]] = []
+        self.interaction_tool_calls: Dict[str, ToolCallRecord] = {}
         self.interaction_has_tracked = False
 
     async def handle(self, event_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -123,10 +124,13 @@ class EventHandler:
     # 事件处理方法
     async def _handle_start(self, event: Dict[str, Any]) -> None:
         logger.debug("Stream started", extra={"session_id": self.session_id})
+        self.interaction_tracker.add_event("start")
 
     async def _handle_reasoning_start(self, event: Dict[str, Any]) -> None:
         if event["id"] in self.reasoning_map:
             return
+
+        self.interaction_tracker.add_event("reasoning-start", {"id": event["id"]})
 
         part = ReasoningPart(
             id=self._generate_id("part"),
@@ -157,6 +161,8 @@ class EventHandler:
 
     async def _handle_reasoning_end(self, event: Dict[str, Any]) -> None:
         if event["id"] in self.reasoning_map:
+            self.interaction_tracker.add_event("reasoning-end", {"id": event["id"]})
+
             part = self.reasoning_map[event["id"]]
             part.text = part.text.rstrip()
             part.time.end = int(time.time() * 1000)
@@ -187,6 +193,12 @@ class EventHandler:
     async def _handle_tool_call(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         existing = self.toolcalls.get(event["tool_call_id"])
         if existing:
+            self.interaction_tracker.add_event("tool-call", {
+                "toolCallId": event["tool_call_id"],
+                "toolName": event["tool_name"],
+                "input": event["input"]
+            })
+
             part = ToolPart(
                 id=existing.id,
                 session_id=existing.session_id,
@@ -203,18 +215,25 @@ class EventHandler:
             )
             self.toolcalls[event["tool_call_id"]] = await self._update_part(part)
 
-            # 收集追踪的工具调用
-            self.interaction_tool_calls.append({
-                "id": event["tool_call_id"],
-                "tool_name": event["tool_name"],
-                "input": event["input"],
-            })
+            # 创建工具调用记录
+            self.interaction_tool_calls[event["tool_call_id"]] = ToolCallRecord(
+                id=event["tool_call_id"],
+                tool_name=event["tool_name"],
+                input=event["input"],
+            )
 
             return event  # 返回事件供 doom loop 检测
 
     async def _handle_tool_result(self, event: Dict[str, Any]) -> None:
         existing = self.toolcalls.get(event["tool_call_id"])
         if existing and isinstance(existing.state, ToolStateRunning):
+            time_end = int(time.time() * 1000)
+
+            self.interaction_tracker.add_event("tool-result", {
+                "toolCallId": event["tool_call_id"],
+                "output": event.get("output")
+            })
+
             part = ToolPart(
                 id=existing.id,
                 session_id=existing.session_id,
@@ -227,11 +246,18 @@ class EventHandler:
                     output=str(event["output"]) if event.get("output") else "",
                     title=event.get("metadata", {}).get("title", "") if event.get("metadata") else "",
                     time_start=existing.state.time_start,
-                    time_end=int(time.time() * 1000),
+                    time_end=time_end,
                     metadata=event.get("metadata"),
                 ),
             )
             await self._update_part(part)
+
+            # 更新工具调用记录
+            if event["tool_call_id"] in self.interaction_tool_calls:
+                record = self.interaction_tool_calls[event["tool_call_id"]]
+                record.output = event.get("output")
+                record.duration = time_end - existing.state.time_start
+
             del self.toolcalls[event["tool_call_id"]]
 
             # Trigger LSP auto-diagnostics for Write/Edit tools
@@ -268,6 +294,12 @@ class EventHandler:
                 if isinstance(existing.state, ToolStateRunning)
                 else int(time.time() * 1000)
             )
+            time_end = int(time.time() * 1000)
+
+            self.interaction_tracker.add_event("tool-error", {
+                "toolCallId": event["tool_call_id"],
+                "error": str(event["error"])
+            })
 
             part = ToolPart(
                 id=existing.id,
@@ -280,10 +312,16 @@ class EventHandler:
                     input=event.get("input") or existing.state.input,
                     error=str(event["error"]),
                     time_start=time_start,
-                    time_end=int(time.time() * 1000),
+                    time_end=time_end,
                 ),
             )
             await self._update_part(part)
+
+            # 更新工具调用记录
+            if event["tool_call_id"] in self.interaction_tool_calls:
+                record = self.interaction_tool_calls[event["tool_call_id"]]
+                record.error = str(event["error"])
+                record.duration = time_end - time_start
 
             # 检查是否为权限错误
             error_type = type(event["error"]).__name__
@@ -294,6 +332,8 @@ class EventHandler:
             return {"blocked": blocked}
 
     async def _handle_text_start(self, event: Dict[str, Any]) -> None:
+        self.interaction_tracker.add_event("text-start")
+
         self.current_text = TextPart(
             id=self._generate_id("part"),
             session_id=self.session_id,
@@ -324,6 +364,8 @@ class EventHandler:
 
     async def _handle_text_end(self, event: Dict[str, Any]) -> None:
         if self.current_text:
+            self.interaction_tracker.add_event("text-end")
+
             self.current_text.text = self.current_text.text.rstrip()
             self.current_text.time.end = int(time.time() * 1000)
             if event.get("provider_metadata"):
@@ -334,6 +376,7 @@ class EventHandler:
 
     async def _handle_start_step(self, event: Dict[str, Any]) -> None:
         self.snapshot = event.get("snapshot")  # 从外部获取
+        self.interaction_tracker.add_event("start-step")
 
         part = StepStartPart(
             id=self._generate_id("part"),
@@ -345,6 +388,11 @@ class EventHandler:
 
     async def _handle_finish_step(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         usage = self._calculate_usage(event.get("usage"), event.get("provider_metadata"))
+
+        self.interaction_tracker.add_event("finish-step", {
+            "finishReason": event["finish_reason"],
+            "usage": event.get("usage")
+        })
 
         # 更新消息
         self.assistant_message.finish = event["finish_reason"]
@@ -365,26 +413,19 @@ class EventHandler:
 
         # 记录交互追踪
         if not self.interaction_has_tracked:
-            usage_data = None
+            usage_record = None
             if event.get("usage"):
-                usage_data = {
-                    "prompt_tokens": event["usage"].get("promptTokens", 0),
-                    "completion_tokens": event["usage"].get("completionTokens", 0),
-                    "total_tokens": event["usage"].get("totalTokens", 0),
-                }
+                usage_record = TokenUsageRecord(
+                    prompt_tokens=event["usage"].get("promptTokens", 0),
+                    completion_tokens=event["usage"].get("completionTokens", 0),
+                    total_tokens=event["usage"].get("totalTokens", 0),
+                )
 
             self.interaction_tracker.record_output(
                 text=self.interaction_output_text,
-                tool_calls=[
-                    {
-                        "id": tc["id"],
-                        "tool_name": tc["tool_name"],
-                        "input": tc["input"],
-                    }
-                    for tc in self.interaction_tool_calls
-                ],
+                tool_calls=list(self.interaction_tool_calls.values()),
                 finish_reason=event["finish_reason"],
-                usage=usage_data,
+                usage=usage_record,
             )
             self.interaction_has_tracked = True
 
@@ -392,6 +433,7 @@ class EventHandler:
 
     async def _handle_finish(self, event: Dict[str, Any]) -> None:
         logger.debug("Stream finished", extra={"session_id": self.session_id})
+        self.interaction_tracker.add_event("finish")
 
     async def _handle_error_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": event["error"]}
