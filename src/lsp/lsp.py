@@ -40,58 +40,57 @@ class LSPManager:
             project_dir: Project root directory
         """
         self.project_dir = os.path.abspath(project_dir)
-        self._clients: Dict[str, LSPClient] = {}
-        self._client_infos: Dict[str, LSPClientInfo] = {}
+        self._clients: Dict[str, LSPClient] = {}  # key: root + server_id
+        self._client_infos: Dict[str, LSPClientInfo] = {}  # key: root + server_id
         self._registry = get_global_registry(project_dir)
-        self._broken: set = set()
-        self._spawning: Dict[str, asyncio.Task] = {}
+        self._broken: set = set()  # set of root + server_id
+        self._spawning: Dict[str, asyncio.Task] = {}  # key: root + server_id
 
-    async def get_client_for_file(self, filepath: str) -> Optional[LSPClient]:
+    async def get_clients_for_file(self, filepath: str) -> List[LSPClient]:
         """
-        Get or create an LSP client for a file.
+        Get or create LSP clients for a file (supports multiple servers per file).
 
         Args:
             filepath: Path to the file
 
         Returns:
-            LSPClient if available and started, None otherwise
+            List of LSPClient instances
         """
-        # Find servers that support this file type
         servers = self._registry.get_for_file(filepath)
-
         if not servers:
             logger.debug(f"No LSP server for file: {filepath}")
-            return None
+            return []
 
-        # Try each server
+        result = []
+
         for server_info in servers:
-            # Find root for this server
             root = self.project_dir
             if server_info.root_function:
                 root = server_info.root_function(filepath)
                 if not root:
                     continue
 
-            # Check if broken
             key = f"{root}_{server_info.id}"
+
             if key in self._broken:
                 continue
 
-            # Check if already spawned
+            # Check if client already exists
+            if key in self._clients:
+                result.append(self._clients[key])
+                continue
+
+            # Check if already spawning
             if key in self._spawning:
                 try:
                     client = await self._spawning[key]
                     if client:
-                        return client
+                        result.append(client)
                 except Exception as e:
                     logger.error(f"Failed to get spawning client: {e}")
                     self._spawning.pop(key, None)
                     self._broken.add(key)
-                    continue
-
-            # Check if client already exists
-            if server_info.id in self._clients:
-                return self._clients[server_info.id]
+                continue
 
             # Spawn new client
             async def spawn_client():
@@ -103,7 +102,6 @@ class LSPManager:
                     self._broken.add(key)
                     return None
 
-                # Create client
                 client = create_client(
                     server_id=server_info.id,
                     root=root,
@@ -114,31 +112,29 @@ class LSPManager:
 
                 try:
                     info = await client.start()
-                    self._clients[server_info.id] = client
-                    self._client_infos[server_info.id] = info
-                    logger.info(f"Spawned LSP server: {server_info.id}")
+                    self._clients[key] = client
+                    self._client_infos[key] = info
+                    logger.info(f"Spawned LSP server: {server_info.id} at {root}")
                     return client
-
                 except Exception as e:
                     logger.error(f"Failed to start LSP client {server_info.id}: {e}")
                     self._broken.add(key)
                     return None
 
-            # Create spawn task
             task = asyncio.create_task(spawn_client())
             self._spawning[key] = task
 
             try:
                 client = await task
                 if client:
-                    return client
+                    result.append(client)
             except Exception as e:
                 logger.error(f"Failed to spawn LSP client: {e}")
                 self._broken.add(key)
             finally:
                 self._spawning.pop(key, None)
 
-        return None
+        return result
 
     async def has_clients(self, filepath: str) -> bool:
         """
@@ -170,9 +166,9 @@ class LSPManager:
             filepath: Path to the file
             wait_for_diagnostics: Whether to wait for diagnostics
         """
-        client = await self.get_client_for_file(filepath)
+        clients = await self.get_clients_for_file(filepath)
 
-        if client:
+        for client in clients:
             await client.open_file(filepath)
 
             if wait_for_diagnostics:
@@ -296,14 +292,14 @@ class LSP:
             List of locations
         """
         manager = cls.get_manager()
-        client = await manager.get_client_for_file(position["file"])
+        clients = await manager.get_clients_for_file(position["file"])
 
-        if client:
+        if clients:
             lsp_pos = LSPPosition(
                 line=position.get("line", 0),
                 character=position.get("character", 0),
             )
-            return await client.request_definition(position["file"], lsp_pos)
+            return await clients[0].request_definition(position["file"], lsp_pos)
 
         return []
 
@@ -319,14 +315,14 @@ class LSP:
             Hover result if available
         """
         manager = cls.get_manager()
-        client = await manager.get_client_for_file(position["file"])
+        clients = await manager.get_clients_for_file(position["file"])
 
-        if client:
+        if clients:
             lsp_pos = LSPPosition(
                 line=position.get("line", 0),
                 character=position.get("character", 0),
             )
-            return await client.request_hover(position["file"], lsp_pos)
+            return await clients[0].request_hover(position["file"], lsp_pos)
 
         return None
 
@@ -342,14 +338,14 @@ class LSP:
             List of locations
         """
         manager = cls.get_manager()
-        client = await manager.get_client_for_file(position["file"])
+        clients = await manager.get_clients_for_file(position["file"])
 
-        if client:
+        if clients:
             lsp_pos = LSPPosition(
                 line=position.get("line", 0),
                 character=position.get("character", 0),
             )
-            return await client.request_references(position["file"], lsp_pos)
+            return await clients[0].request_references(position["file"], lsp_pos)
 
         return []
 
@@ -364,7 +360,6 @@ class LSP:
         Returns:
             List of document symbols
         """
-        # Convert URI to file path
         from urllib.parse import urlparse
         from urllib.request import url2pathname
 
@@ -375,10 +370,10 @@ class LSP:
             filepath = uri
 
         manager = cls.get_manager()
-        client = await manager.get_client_for_file(filepath)
+        clients = await manager.get_clients_for_file(filepath)
 
-        if client:
-            return await client.request_document_symbols(filepath)
+        if clients:
+            return await clients[0].request_document_symbols(filepath)
 
         return []
 
@@ -416,10 +411,10 @@ class LSP:
             List of locations
         """
         manager = cls.get_manager()
-        client = await manager.get_client_for_file(position["file"])
+        clients = await manager.get_clients_for_file(position["file"])
 
-        if client:
-            info = client.get_info()
+        if clients:
+            info = clients[0].get_info()
             if info:
                 lsp_pos = LSPPosition(
                     line=position.get("line", 0),
@@ -441,10 +436,10 @@ class LSP:
             List of call hierarchy items
         """
         manager = cls.get_manager()
-        client = await manager.get_client_for_file(position["file"])
+        clients = await manager.get_clients_for_file(position["file"])
 
-        if client:
-            info = client.get_info()
+        if clients:
+            info = clients[0].get_info()
             if info:
                 lsp_pos = LSPPosition(
                     line=position.get("line", 0),
@@ -466,10 +461,10 @@ class LSP:
             List of call hierarchy items
         """
         manager = cls.get_manager()
-        client = await manager.get_client_for_file(position["file"])
+        clients = await manager.get_clients_for_file(position["file"])
 
-        if client:
-            info = client.get_info()
+        if clients:
+            info = clients[0].get_info()
             if info:
                 lsp_pos = LSPPosition(
                     line=position.get("line", 0),
@@ -491,10 +486,10 @@ class LSP:
             List of call hierarchy items
         """
         manager = cls.get_manager()
-        client = await manager.get_client_for_file(position["file"])
+        clients = await manager.get_clients_for_file(position["file"])
 
-        if client:
-            info = client.get_info()
+        if clients:
+            info = clients[0].get_info()
             if info:
                 lsp_pos = LSPPosition(
                     line=position.get("line", 0),
@@ -528,3 +523,34 @@ class LSP:
         """
         manager = cls.get_manager()
         return manager.get_status()
+
+
+class Diagnostic:
+    """Diagnostic formatting utilities."""
+
+    @staticmethod
+    def pretty(diagnostic: Dict[str, Any]) -> str:
+        """
+        Format a diagnostic message for display.
+
+        Args:
+            diagnostic: LSP diagnostic object
+
+        Returns:
+            Formatted diagnostic string
+        """
+        severity_map = {
+            1: "ERROR",
+            2: "WARN",
+            3: "INFO",
+            4: "HINT",
+        }
+
+        severity = severity_map.get(diagnostic.get("severity", 1), "ERROR")
+        range_info = diagnostic.get("range", {})
+        start = range_info.get("start", {})
+        line = start.get("line", 0) + 1
+        col = start.get("character", 0) + 1
+        message = diagnostic.get("message", "")
+
+        return f"{severity} [{line}:{col}] {message}"
