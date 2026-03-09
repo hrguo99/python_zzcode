@@ -124,13 +124,15 @@ class EventHandler:
     # 事件处理方法
     async def _handle_start(self, event: Dict[str, Any]) -> None:
         logger.debug("Stream started", extra={"session_id": self.session_id})
-        self.interaction_tracker.add_event("start")
+        if self.interaction_tracker:
+            self.interaction_tracker.add_event("start")
 
     async def _handle_reasoning_start(self, event: Dict[str, Any]) -> None:
         if event["id"] in self.reasoning_map:
             return
 
-        self.interaction_tracker.add_event("reasoning-start", {"id": event["id"]})
+        if self.interaction_tracker:
+            self.interaction_tracker.add_event("reasoning-start", {"id": event["id"]})
 
         part = ReasoningPart(
             id=self._generate_id("part"),
@@ -161,7 +163,8 @@ class EventHandler:
 
     async def _handle_reasoning_end(self, event: Dict[str, Any]) -> None:
         if event["id"] in self.reasoning_map:
-            self.interaction_tracker.add_event("reasoning-end", {"id": event["id"]})
+            if self.interaction_tracker:
+                self.interaction_tracker.add_event("reasoning-end", {"id": event["id"]})
 
             part = self.reasoning_map[event["id"]]
             part.text = part.text.rstrip()
@@ -193,11 +196,12 @@ class EventHandler:
     async def _handle_tool_call(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         existing = self.toolcalls.get(event["tool_call_id"])
         if existing:
-            self.interaction_tracker.add_event("tool-call", {
-                "toolCallId": event["tool_call_id"],
-                "toolName": event["tool_name"],
-                "input": event["input"]
-            })
+            if self.interaction_tracker:
+                self.interaction_tracker.add_event("tool-call", {
+                    "toolCallId": event["tool_call_id"],
+                    "toolName": event["tool_name"],
+                    "input": event["input"]
+                })
 
             part = ToolPart(
                 id=existing.id,
@@ -229,10 +233,11 @@ class EventHandler:
         if existing and isinstance(existing.state, ToolStateRunning):
             time_end = int(time.time() * 1000)
 
-            self.interaction_tracker.add_event("tool-result", {
-                "toolCallId": event["tool_call_id"],
-                "output": event.get("output")
-            })
+            if self.interaction_tracker:
+                self.interaction_tracker.add_event("tool-result", {
+                    "toolCallId": event["tool_call_id"],
+                    "output": event.get("output")
+                })
 
             part = ToolPart(
                 id=existing.id,
@@ -296,10 +301,11 @@ class EventHandler:
             )
             time_end = int(time.time() * 1000)
 
-            self.interaction_tracker.add_event("tool-error", {
-                "toolCallId": event["tool_call_id"],
-                "error": str(event["error"])
-            })
+            if self.interaction_tracker:
+                self.interaction_tracker.add_event("tool-error", {
+                    "toolCallId": event["tool_call_id"],
+                    "error": str(event["error"])
+                })
 
             part = ToolPart(
                 id=existing.id,
@@ -332,7 +338,8 @@ class EventHandler:
             return {"blocked": blocked}
 
     async def _handle_text_start(self, event: Dict[str, Any]) -> None:
-        self.interaction_tracker.add_event("text-start")
+        if self.interaction_tracker:
+            self.interaction_tracker.add_event("text-start")
 
         self.current_text = TextPart(
             id=self._generate_id("part"),
@@ -364,7 +371,8 @@ class EventHandler:
 
     async def _handle_text_end(self, event: Dict[str, Any]) -> None:
         if self.current_text:
-            self.interaction_tracker.add_event("text-end")
+            if self.interaction_tracker:
+                self.interaction_tracker.add_event("text-end")
 
             self.current_text.text = self.current_text.text.rstrip()
             self.current_text.time.end = int(time.time() * 1000)
@@ -376,7 +384,8 @@ class EventHandler:
 
     async def _handle_start_step(self, event: Dict[str, Any]) -> None:
         self.snapshot = event.get("snapshot")  # 从外部获取
-        self.interaction_tracker.add_event("start-step")
+        if self.interaction_tracker:
+            self.interaction_tracker.add_event("start-step")
 
         part = StepStartPart(
             id=self._generate_id("part"),
@@ -389,10 +398,11 @@ class EventHandler:
     async def _handle_finish_step(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         usage = self._calculate_usage(event.get("usage"), event.get("provider_metadata"))
 
-        self.interaction_tracker.add_event("finish-step", {
-            "finishReason": event["finish_reason"],
-            "usage": event.get("usage")
-        })
+        if self.interaction_tracker:
+            self.interaction_tracker.add_event("finish-step", {
+                "finishReason": event["finish_reason"],
+                "usage": event.get("usage")
+            })
 
         # 更新消息
         self.assistant_message.finish = event["finish_reason"]
@@ -421,19 +431,21 @@ class EventHandler:
                     total_tokens=event["usage"].get("totalTokens", 0),
                 )
 
-            self.interaction_tracker.record_output(
-                text=self.interaction_output_text,
-                tool_calls=list(self.interaction_tool_calls.values()),
-                finish_reason=event["finish_reason"],
-                usage=usage_record,
-            )
+            if self.interaction_tracker:
+                self.interaction_tracker.record_output(
+                    text=self.interaction_output_text,
+                    tool_calls=list(self.interaction_tool_calls.values()),
+                    finish_reason=event["finish_reason"],
+                    usage=usage_record,
+                )
             self.interaction_has_tracked = True
 
         return {"snapshot": self.snapshot}
 
     async def _handle_finish(self, event: Dict[str, Any]) -> None:
         logger.debug("Stream finished", extra={"session_id": self.session_id})
-        self.interaction_tracker.add_event("finish")
+        if self.interaction_tracker:
+            self.interaction_tracker.add_event("finish")
 
     async def _handle_error_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": event["error"]}
