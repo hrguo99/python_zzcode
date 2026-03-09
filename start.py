@@ -102,12 +102,20 @@ async def main():
                 response_parts = []
                 tool_used = None
                 event_count = {}  # 调试：统计事件类型
+                event_log = []  # 完整事件流日志
+
                 async for event in orch.process(
                     user_input=user_input,
                     session_id=session.id,
                 ):
                     event_type = event.get("type")
                     event_count[event_type] = event_count.get(event_type, 0) + 1
+
+                    # 记录完整事件流
+                    event_log.append({
+                        "type": event_type,
+                        "data": event
+                    })
 
                     # 只显示文本内容给用户
                     if event_type == "content":
@@ -137,6 +145,32 @@ async def main():
                 print(f"\n[DEBUG] 事件统计: {event_count}", flush=True)
                 print(f"[DEBUG] response_parts 长度: {len(response_parts)}", flush=True)
                 print(f"[DEBUG] tool_used: {tool_used}", flush=True)
+
+                # 输出完整事件流日志
+                print("\n" + "=" * 60)
+                print("📋 完整事件流日志:")
+                print("=" * 60)
+                for i, log_entry in enumerate(event_log, 1):
+                    event_type = log_entry["type"]
+                    event_data = log_entry["data"]
+                    print(f"{i}. [{event_type}]", end="")
+
+                    # 显示关键信息
+                    if event_type == "tool-call":
+                        print(f" 工具: {event_data.get('tool_name')}, 参数: {event_data.get('input')}")
+                    elif event_type == "tool-result":
+                        output = event_data.get('output', '')
+                        output_preview = str(output)[:50] + "..." if len(str(output)) > 50 else str(output)
+                        print(f" 输出: {output_preview}")
+                    elif event_type == "tool-error":
+                        print(f" 错误: {event_data.get('error')}")
+                    elif event_type in ["text", "content"]:
+                        text = event_data.get('text') or event_data.get('content', '')
+                        text_preview = text[:30] + "..." if len(text) > 30 else text
+                        print(f" 内容: {text_preview}")
+                    else:
+                        print()
+                print("=" * 60 + "\n")
 
                 # 如果AI没有生成文本但使用了工具，显示友好的确认消息
                 if not response_parts and tool_used:
